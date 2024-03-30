@@ -25,7 +25,7 @@
 #define CHANNEL_NUM 1
 
 uint8_t** split_image(uint8_t* input_image, int height, int width, int num_procs);
-uint8_t* edgeDetection(uint8_t* input_image, int old_width, int new_width, int new_height);
+uint8_t* edgeDetection(uint8_t* local_image, int local_width, int local_height);
 uint8_t* combine_image(int chunk_number, int chunk_width, int chunk_height, uint8_t** edge_image_arr);
 
 int main(int argc, char* argv[])
@@ -59,14 +59,13 @@ int main(int argc, char* argv[])
         // Send image chunks and other variables to processes
         for (int i = 1; i < num_procs; i++) {
             MPI_Send(&chunk_height, sizeof(int), MPI_INT, i, 0, MPI_COMM_WORLD);
-            MPI_Send(&width, sizeof(int), MPI_INT, i, 0, MPI_COMM_WORLD);
             MPI_Send(&new_width, sizeof(int), MPI_INT, i, 0, MPI_COMM_WORLD);
             MPI_Send(&new_height, sizeof(int), MPI_INT, i, 0, MPI_COMM_WORLD);
             MPI_Send(image_chunks[i], chunk_height * width * sizeof(uint8_t), MPI_UINT8_T, i, 0, MPI_COMM_WORLD);
         }
 
         // Downsize the first part of the image on the root process and put it into array
-        edge_image_chunks[0] = edgeDetection(image_chunks[0], width, new_width, new_height);
+        edge_image_chunks[0] = edgeDetection(image_chunks[0], new_width, new_height);
 
         // Receive the downsized image chunks from processors
         for (int i = 1; i < num_procs; i++) {
@@ -100,7 +99,6 @@ int main(int argc, char* argv[])
 
         // Receive the necessary variables
         MPI_Recv(&chunk_height, sizeof(int), MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Recv(&width, sizeof(int), MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         MPI_Recv(&new_width, sizeof(int), MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         MPI_Recv(&new_height, sizeof(int), MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
@@ -109,7 +107,7 @@ int main(int argc, char* argv[])
         MPI_Recv(image_chunk, chunk_height * width * sizeof(uint8_t), MPI_UINT8_T, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
         // Downsize and send to main process
-        MPI_Send(edgeDetection(image_chunk, width, new_width, new_height), new_width * new_height * sizeof(uint8_t), MPI_UINT8_T, 0, 0, MPI_COMM_WORLD);
+        MPI_Send(edgeDetection(image_chunk, new_width, new_height), new_width * new_height * sizeof(uint8_t), MPI_UINT8_T, 0, 0, MPI_COMM_WORLD);
 
     }
 
@@ -130,64 +128,65 @@ uint8_t** split_image(uint8_t* input_image, int height, int num_procs, int width
         // Calculate the y-coordinate of the top of the chunk
         int y = i * chunk_height;
 
-        // Store the chunk image in the array
-        chunk_images[i] = input_image + y * width * CHANNEL_NUM, width* chunk_height* CHANNEL_NUM;
+        // Allocate memory for the chunk image
+        chunk_images[i] = (uint8_t*)malloc(chunk_height * width * CHANNEL_NUM * sizeof(uint8_t));
+
+        // Copy the chunk image data
+        memcpy(chunk_images[i], input_image + y * width * CHANNEL_NUM, chunk_height * width * CHANNEL_NUM);
     }
 
     return chunk_images;
 }
 
-uint8_t* edgeDetection(uint8_t* input_image, int old_width, int new_width, int new_height) {
-    uint8_t* output_image = (uint8_t*)malloc(new_width * new_height * CHANNEL_NUM * sizeof(uint8_t));
+uint8_t* edgeDetection(uint8_t* local_image, int local_width, int local_height) {
+    uint8_t* output_image = (uint8_t*)malloc(local_width * local_height * CHANNEL_NUM * sizeof(uint8_t));
     // Sobel operators
     int sobel_x[3][3] = { {-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1} };
     int sobel_y[3][3] = { {-1, -2, -1}, {0, 0, 0}, {1, 2, 1} };
 
     // Temporary buffers for gradient values
-    int* gradient_x = (int*)malloc(new_height * new_width * sizeof(int));
-    int* gradient_y = (int*)malloc(new_height * new_width * sizeof(int));
+    int* gradient_x = (int*)malloc(local_height * local_width * sizeof(int));
+    int* gradient_y = (int*)malloc(local_height * local_width * sizeof(int));
 
     // Compute gradient in x direction
-    for (int i = 1; i < new_height - 1; i++) {
-        for (int j = 1; j < new_width - 1; j++) {
+    for (int i = 1; i < local_height - 1; i++) {
+        for (int j = 1; j < local_width - 1; j++) {
             int sum_x = 0;
             for (int k = -1; k <= 1; k++) {
                 for (int l = -1; l <= 1; l++) {
-                    sum_x += input_image[(i + k) * new_width + (j + l)] * sobel_x[k + 1][l + 1];
+                    sum_x += local_image[(i + k) * local_width + (j + l)] * sobel_x[k + 1][l + 1];
                 }
             }
-            gradient_x[i * new_width + j] = sum_x;
+            gradient_x[i * local_width + j] = sum_x;
         }
     }
 
     // Compute gradient in y direction
-    for (int i = 1; i < new_height - 1; i++) {
-        for (int j = 1; j < new_width - 1; j++) {
+    for (int i = 1; i < local_height - 1; i++) {
+        for (int j = 1; j < local_width - 1; j++) {
             int sum_y = 0;
             for (int k = -1; k <= 1; k++) {
                 for (int l = -1; l <= 1; l++) {
-                    sum_y += input_image[(i + k) * new_width + (j + l)] * sobel_y[k + 1][l + 1];
+                    sum_y += local_image[(i + k) * local_width + (j + l)] * sobel_y[k + 1][l + 1];
                 }
             }
-            gradient_y[i * new_width + j] = sum_y;
+            gradient_y[i * local_width + j] = sum_y;
         }
     }
 
     // Compute gradient magnitude
-    for (int i = 1; i < new_height - 1; i++) {
-        for (int j = 1; j < new_width - 1; j++) {
-            int gx = gradient_x[i * new_width + j];
-            int gy = gradient_y[i * new_width + j];
-            output_image[i * new_width + j] = (uint8_t)sqrt(gx * gx + gy * gy);
+    for (int i = 1; i < local_height - 1; i++) {
+        for (int j = 1; j < local_width - 1; j++) {
+            int gx = gradient_x[i * local_width + j];
+            int gy = gradient_y[i * local_width + j];
+            output_image[i * local_width + j] = (uint8_t)sqrt(gx * gx + gy * gy);
         }
     }
 
     // Free allocated memory
     free(gradient_x);
     free(gradient_y);
-
     return output_image;
-
 }
 
 
