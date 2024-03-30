@@ -1,1 +1,1 @@
-# EdgeDetection_ParallelProgramming
+# Edge Detection with Parallel Programming
